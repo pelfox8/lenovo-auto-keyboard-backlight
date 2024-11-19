@@ -3,26 +3,47 @@
 use std::collections::HashMap;
 use wmi::{COMLibrary, Variant, WMIConnection, WMIResult};
 
-use std::process::{Command, Output};
+use std::process::{Command};
 use std::sync::{Arc, Mutex};
 use std::{thread};
 use std::os::windows::process::CommandExt;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use rdev::{listen, Event, EventType};
+use serde::Deserialize;
 
 const LENOVO_CLASS: &str = "LENOVO_LIGHTING_METHOD";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const TIMEOUT: u64 = 30;
 
 fn check_class() -> bool {
-    let com_lib = COMLibrary::new().unwrap();
-    let wmi_con = WMIConnection::with_namespace_path("root\\WMI", com_lib).unwrap();
+    let wmi_con = get_wmi_connection();
     let query = format!("SELECT * FROM {}", LENOVO_CLASS);
     let results: WMIResult<Vec<HashMap<String, Variant>>> = wmi_con.raw_query(query);
 
     results.is_ok()
 }
+
+fn subscribe_on_change_backlight(backlight_enable: &Arc<Mutex<bool>>) {
+    #[derive(Deserialize, Debug)]
+    #[serde(rename = "LENOVO_LIGHTING_EVENT")]
+    struct LenovoLighting {}
+
+    let wmi_con = get_wmi_connection();
+
+    let iterator = wmi_con.notification::<LenovoLighting>().unwrap();
+
+    for _ in iterator {
+        let mut enable_lock = backlight_enable.lock().unwrap();
+        *enable_lock = get_current_level() != "1";
+    }
+}
+
+fn get_wmi_connection() -> WMIConnection {
+    let com_lib = COMLibrary::new().unwrap();
+    WMIConnection::with_namespace_path("root\\WMI", com_lib).unwrap()
+}
+
 
 fn main() {
     if !check_class() {
@@ -35,10 +56,16 @@ fn main() {
 
     let clone_arc_backlight_enable = Arc::clone(&arc_backlight_enable);
     let clone_arc_last_time = Arc::clone(&arc_last_time);
-
+    
     thread::spawn(move || {
         listen(move |event| callback(event, &clone_arc_last_time, &clone_arc_backlight_enable))
             .expect("Error listening");
+    });
+    
+    let clone2_arc_backlight_enable = Arc::clone(&arc_backlight_enable);
+    
+    thread::spawn(move || {
+        subscribe_on_change_backlight(&clone2_arc_backlight_enable)
     });
 
     loop {
@@ -65,29 +92,26 @@ fn callback(event: Event, last_time: &Arc<Mutex<SystemTime>>, backlight_enable: 
 }
 
 fn get_current_level() -> String {
-    let output = run_ps_command(format!(
+    let mut command = get_command(format!(
         "(Get-WmiObject -namespace root\\WMI -class {}).Get_Lighting_Current_Status(0).Current_Brightness_Level",
         LENOVO_CLASS
     ));
-    if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        panic!("Could not get current level");
-    }
+    let output = command.output().unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn run_ps_command(command: String) -> Output {
-    Command::new("powershell")
-        .arg("-Command")
-        .arg(command)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .expect("Failed to execute command")
+fn get_command(query: String) -> Command {
+    let mut command = Command::new("powershell");
+    command.arg("-Command");
+    command.arg(query);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn set_backlight(level: u8) {
-    run_ps_command(format!(
+    get_command(format!(
         "(Get-WmiObject -namespace root\\WMI -class {}).Set_Lighting_Current_Status(0,0,{})",
-        LENOVO_CLASS, level
-    ));
+        LENOVO_CLASS, 
+        level
+    )).spawn().expect("");
 }
