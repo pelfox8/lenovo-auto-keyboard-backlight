@@ -1,30 +1,62 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
 use wmi::{COMLibrary, Variant, WMIConnection, WMIResult};
 
 use std::process::{Command};
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, RwLock};
 use std::{thread};
 use std::os::windows::process::CommandExt;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
-use rdev::{listen, Event, EventType};
+use rdev::{listen, Event, Key};
 use serde::Deserialize;
+use once_cell::sync::Lazy;
+use rdev::EventType::KeyPress;
 
 const LENOVO_CLASS: &str = "LENOVO_LIGHTING_METHOD";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const TIMEOUT: u64 = 30;
 
-fn check_class() -> bool {
+static LAST_TIME_KEY_PRESS: Lazy<Mutex<SystemTime>> = Lazy::new(|| Mutex::new(SystemTime::now()));
+static BACKLIGHT_STATUS: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
+static BACKLIGHT_LEVEL: Lazy<RwLock<u8>> = Lazy::new(|| RwLock::new(2));
+
+fn main() {
+    check_class();
+
+    thread::spawn(|| {
+        listen(callback).expect("Error listening");
+    });
+
+    thread::spawn(subscribe_on_change_backlight);
+
+    loop {
+        handle_backlight_timeout()
+    }
+}
+
+fn handle_backlight_timeout() {
+    let last_time = *LAST_TIME_KEY_PRESS.lock().unwrap();
+    let duration = SystemTime::now().duration_since(last_time).unwrap().as_secs();
+    if duration > TIMEOUT {
+        change_backlight(false);
+    }
+
+    sleep(Duration::from_secs(if duration > TIMEOUT { TIMEOUT } else { TIMEOUT - duration }));
+}
+
+fn check_class() {
     let wmi_con = get_wmi_connection();
     let query = format!("SELECT * FROM {}", LENOVO_CLASS);
     let results: WMIResult<Vec<HashMap<String, Variant>>> = wmi_con.raw_query(query);
 
-    results.is_ok()
+    if results.is_err() {
+        std::process::exit(1);
+    }
 }
 
-fn subscribe_on_change_backlight(backlight_enable: &Arc<Mutex<bool>>) {
+fn subscribe_on_change_backlight() {
     #[derive(Deserialize, Debug)]
     #[serde(rename = "LENOVO_LIGHTING_EVENT")]
     struct LenovoLighting {}
@@ -34,8 +66,11 @@ fn subscribe_on_change_backlight(backlight_enable: &Arc<Mutex<bool>>) {
     let iterator = wmi_con.notification::<LenovoLighting>().unwrap();
 
     for _ in iterator {
-        let mut enable_lock = backlight_enable.lock().unwrap();
-        *enable_lock = get_current_level() != "1";
+        let level = get_current_level();
+
+        *BACKLIGHT_LEVEL.write().unwrap() = level;
+
+        *BACKLIGHT_STATUS.write().unwrap() = level != 1;
     }
 }
 
@@ -44,60 +79,32 @@ fn get_wmi_connection() -> WMIConnection {
     WMIConnection::with_namespace_path("root\\WMI", com_lib).unwrap()
 }
 
+fn callback(event: Event) {
+    let key = match event.event_type { 
+        KeyPress(key) => key,
+        _ => return,
+    };
 
-fn main() {
-    if !check_class() {
-        eprintln!("Class '{}' not found. Ensure Lenovo WMI drivers are installed.", LENOVO_CLASS);
-        std::process::exit(1);
-    }
+    match key {
+        Key::DownArrow | Key::UpArrow | Key::LeftArrow |
+        Key::RightArrow | Key::Alt | Key::Unknown(_) |
+        Key::ControlLeft | Key::ControlRight | Key::Escape |
+        Key::Space | Key::AltGr => { return; }
+        _ => {}
+    };
 
-    let arc_backlight_enable = Arc::new(Mutex::new(get_current_level() != "1"));
-    let arc_last_time = Arc::new(Mutex::new(SystemTime::now()));
+    *LAST_TIME_KEY_PRESS.lock().unwrap() = event.time;
 
-    let clone_arc_backlight_enable = Arc::clone(&arc_backlight_enable);
-    let clone_arc_last_time = Arc::clone(&arc_last_time);
-    
-    thread::spawn(move || {
-        listen(move |event| callback(event, &clone_arc_last_time, &clone_arc_backlight_enable))
-            .expect("Error listening");
-    });
-    
-    let clone2_arc_backlight_enable = Arc::clone(&arc_backlight_enable);
-    
-    thread::spawn(move || {
-        subscribe_on_change_backlight(&clone2_arc_backlight_enable)
-    });
-
-    loop {
-        let duration = SystemTime::now().duration_since(*arc_last_time.lock().unwrap()).unwrap().as_secs();
-        if duration > TIMEOUT && *arc_backlight_enable.lock().unwrap() {
-            set_backlight(1);
-            let mut v = arc_backlight_enable.lock().unwrap();
-            *v = false;
-        }
-
-        sleep(Duration::from_secs(if duration > TIMEOUT { TIMEOUT } else { TIMEOUT - duration }));
-    }
+    change_backlight(true);
 }
 
-fn callback(event: Event, last_time: &Arc<Mutex<SystemTime>>, backlight_enable: &Arc<Mutex<bool>>) {
-    if let EventType::KeyPress(_) = event.event_type {
-        *last_time.lock().unwrap() = event.time;
-        let mut enable_lock = backlight_enable.lock().unwrap();
-        if !*enable_lock {
-            set_backlight(2);
-            *enable_lock = true;
-        }
-    }
-}
-
-fn get_current_level() -> String {
+fn get_current_level() -> u8 {
     let mut command = get_command(format!(
         "(Get-WmiObject -namespace root\\WMI -class {}).Get_Lighting_Current_Status(0).Current_Brightness_Level",
         LENOVO_CLASS
     ));
     let output = command.output().unwrap();
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    String::from_utf8_lossy(&output.stdout).trim().parse::<u8>().unwrap()
 }
 
 fn get_command(query: String) -> Command {
@@ -108,10 +115,19 @@ fn get_command(query: String) -> Command {
     command
 }
 
-fn set_backlight(level: u8) {
-    get_command(format!(
+fn change_backlight(status: bool) {
+    let level = *BACKLIGHT_LEVEL.read().unwrap();
+    if level < 2 {
+        return;
+    }
+
+    *BACKLIGHT_STATUS.write().unwrap() = status;
+
+    let command = format!(
         "(Get-WmiObject -namespace root\\WMI -class {}).Set_Lighting_Current_Status(0,0,{})",
-        LENOVO_CLASS, 
-        level
-    )).spawn().expect("");
+        LENOVO_CLASS,
+        if status { level } else { 1 }
+    );
+    
+    get_command(command).spawn().expect("");
 }

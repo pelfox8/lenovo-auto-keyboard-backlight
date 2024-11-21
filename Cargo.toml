@@ -1,6 +1,6 @@
 [package]
 name = "lenovo-auto-keyboard-backlight"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -8,3 +8,4 @@ wmi = "0.14.0"
 rdev = "0.5.3"
 windows = "0.58.0"
 serde = { version = "1.0.215", features = ["derive"] }
+once_cell = "1.20.2"
