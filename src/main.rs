@@ -59,7 +59,7 @@ fn main() {
     let event_loop = EventLoopBuilder::new().build();
     event_loop.run(move |_event, _, control_flow| {
         *control_flow =
-            ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(16));
+            ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(200));
 
         if menu_channel.try_recv().is_ok() {
             exit(1);
