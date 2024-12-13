@@ -5,5 +5,5 @@ The application detects user activity (keyboard presses) and automatically enabl
 When the user is inactive by keyboard for a set period (default: 30 seconds), the backlight turns off.
 
 Functional on tray icon: \
-Left CLick - turning on\off auto backlight
+Left CLick - turning on\off auto backlight \
 Right Click - opening menu of program
