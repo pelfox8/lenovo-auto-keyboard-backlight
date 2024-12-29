@@ -7,3 +7,5 @@ When the user is inactive by keyboard for a set period (default: 30 seconds), th
 Functional on tray icon: \
 Left CLick - turning on\off auto backlight \
 Right Click - opening menu of program
+
+*The application may need to be run with administrator privileges.
